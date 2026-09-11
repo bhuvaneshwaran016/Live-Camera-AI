@@ -1,0 +1,38 @@
+# ============================================================
+# Live Vision AI Configuration
+# ============================================================
+
+camera:
+  index: 0
+  width: 1280
+  height: 720
+  fps: 30
+
+detection:
+  model: yolo11m.pt
+  image_size: 640
+  confidence: 0.25
+  iou: 0.45
+  tracker: bytetrack.yaml
+
+qwen:
+  model: models/Qwen2.5-VL-3B-Instruct
+  max_new_tokens: 256
+  temperature: 0.0
+
+tracking:
+  max_missing_frames: 30
+  max_center_distance: 180.0
+  min_iou: 0.05
+  min_confirmed_hits: 3
+  distance_weight: 0.40
+  iou_weight: 0.30
+  appearance_weight: 0.30
+  appearance_gate: 0.15
+
+camera_motion:
+  enabled: true
+
+application:
+  window_name: Live Vision AI
+  show_window: true
