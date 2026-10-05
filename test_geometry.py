@@ -31,7 +31,7 @@ print("Center:", bbox_center(bus))
 print("Area:", bbox_area(bus))
 
 
-print("\nPERSON → BUS")
+print("\nPERSON -> BUS")
 
 print(
     "Relative position:",
@@ -54,7 +54,7 @@ print(
 )
 
 
-print("\nPERSON → NEAR PERSON")
+print("\nPERSON -> NEAR PERSON")
 
 print(
     "Relative position:",

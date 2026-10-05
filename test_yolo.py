@@ -5,8 +5,11 @@ import torch
 from ultralytics import YOLO
 
 
+import ultralytics
+import os
+
 MODEL_PATH = "yolo11m.pt"
-IMAGE_PATH = ".venv/lib/python3.12/site-packages/ultralytics/assets/bus.jpg"
+IMAGE_PATH = os.path.join(os.path.dirname(ultralytics.__file__), "assets", "bus.jpg")
 
 IMG_SIZE = 640
 CONF = 0.25

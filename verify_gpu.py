@@ -188,8 +188,31 @@ def main():
     print()
     print("CUDA GPU detected successfully.")
 
+    vram = torch_info["vram_gb"] or 0.0
+    print()
+    print("=" * 50)
+    print("LAPTOP OPTIMIZATION RECOMMENDATION")
+    print("=" * 50)
+
+    try:
+        import bitsandbytes
+        print_status("bitsandbytes", bitsandbytes.__version__)
+    except Exception:
+        print_status("bitsandbytes", "Not installed")
+
+    if vram <= 7.0:
+        print(f"\n[Laptop Profile Detected: {torch_info['gpu_name']} ({vram:.2f} GB VRAM)]")
+        print("  - Qwen precision : '4bit' (uses ~2.2 GB VRAM)")
+        print("  - YOLO model     : 'yolo11s.pt' (fast & lightweight)")
+        print("  - Status         : READY for laptop execution in config.yaml")
+    else:
+        print(f"\n[High-VRAM GPU Detected: {torch_info['gpu_name']} ({vram:.2f} GB VRAM)]")
+        print("  - Qwen precision : '4bit' or 'float16'")
+        print("  - YOLO model     : 'yolo11s.pt' or 'yolo11m.pt'")
+
     print()
     print("Next step:")
-    print("Run the commands below and save the complete output.")
+    print("Run `run.bat` or `python live_vision_qa.py` to start Live Vision AI.")
+
 if __name__ == "__main__":
     main()

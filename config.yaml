@@ -1,5 +1,5 @@
 # ============================================================
-# Live Vision AI Configuration
+# Live Vision AI Configuration (Laptop-Optimized)
 # ============================================================
 
 camera:
@@ -9,14 +9,24 @@ camera:
   fps: 30
 
 detection:
+  # Model set to yolo11m.pt for high detection accuracy
   model: yolo11m.pt
   image_size: 640
   confidence: 0.25
   iou: 0.45
   tracker: bytetrack.yaml
+  # Live video on-spot filter (e.g., "laptop", "computer", "person", "phone", or null for all objects)
+  filter: null
 
 qwen:
   model: models/Qwen2.5-VL-3B-Instruct
+  # Precision modes for laptop GPU (RTX 4050 6GB / 3050 4GB / etc.):
+  #   "4bit"    -> ~2.2 GB VRAM (RECOMMENDED for 4GB-6GB Laptop GPUs)
+  #   "8bit"    -> ~3.5 GB VRAM
+  #   "float16" -> ~6.5 GB VRAM (Requires 8GB+ VRAM GPU)
+  #   "cpu"     -> Runs on System RAM/CPU
+  precision: "4bit"
+  device: "cuda"
   max_new_tokens: 256
   temperature: 0.0
 
@@ -36,3 +46,4 @@ camera_motion:
 application:
   window_name: Live Vision AI
   show_window: true
+

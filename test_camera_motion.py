@@ -4,9 +4,13 @@ import math
 from camera_motion import CameraMotionEstimator
 
 
-IMAGE_PATH = (
-    ".venv/lib/python3.12/site-packages/"
-    "ultralytics/assets/bus.jpg"
+import os
+import ultralytics
+
+IMAGE_PATH = os.path.join(
+    os.path.dirname(ultralytics.__file__),
+    "assets",
+    "bus.jpg"
 )
 
 TEST_ANGLES = [

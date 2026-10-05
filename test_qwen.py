@@ -1,10 +1,14 @@
+import os
 import time
+from pathlib import Path
 import torch
+import ultralytics
 
 from PIL import Image
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoProcessor,
+    BitsAndBytesConfig,
 )
 from qwen_vl_utils import process_vision_info
 
@@ -13,12 +17,12 @@ from qwen_vl_utils import process_vision_info
 # CONFIGURATION
 # ============================================================
 
-MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
+PROJECT_DIR = Path(__file__).resolve().parent
+LOCAL_MODEL_PATH = PROJECT_DIR / "models" / "Qwen2.5-VL-3B-Instruct"
 
-IMAGE_PATH = (
-    ".venv/lib/python3.12/site-packages/"
-    "ultralytics/assets/bus.jpg"
-)
+MODEL_ID = str(LOCAL_MODEL_PATH) if LOCAL_MODEL_PATH.exists() else "Qwen/Qwen2.5-VL-3B-Instruct"
+
+IMAGE_PATH = os.path.join(os.path.dirname(ultralytics.__file__), "assets", "bus.jpg")
 
 USER_PROMPT = (
     "Look carefully at this image. "
@@ -35,7 +39,7 @@ MAX_NEW_TOKENS = 256
 # ============================================================
 
 print("=" * 60)
-print("QWEN2.5-VL-3B IMAGE UNDERSTANDING TEST")
+print("QWEN2.5-VL-3B IMAGE UNDERSTANDING TEST (LAPTOP OPTIMIZED)")
 print("=" * 60)
 
 print("\nPyTorch version:", torch.__version__)
@@ -75,25 +79,32 @@ print("Processor loaded successfully.")
 
 
 # ============================================================
-# LOAD MODEL
+# LOAD MODEL (4-BIT QUANTIZED FOR LAPTOP)
 # ============================================================
 
 print("\n" + "-" * 60)
-print("LOADING QWEN MODEL")
+print("LOADING QWEN MODEL (4-bit NF4 Quantization)")
 print("-" * 60)
 
 load_start = time.perf_counter()
 
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4",
+)
+
 model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16,
+    quantization_config=quantization_config,
     device_map="auto",
 )
 
 load_time = time.perf_counter() - load_start
 
-print("Model loaded successfully.")
+print("Model loaded successfully in 4-bit mode.")
 print(f"Load time: {load_time:.2f} seconds")
+
 
 print("\nModel device:")
 print(next(model.parameters()).device)

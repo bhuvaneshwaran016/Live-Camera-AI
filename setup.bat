@@ -84,11 +84,11 @@ if errorlevel 1 (
 )
 
 echo.
-echo [7/8] Downloading YOLO11m...
+echo [7/8] Downloading YOLO models (yolo11s.pt & yolo11m.pt)...
 
-python -c "from ultralytics import YOLO; YOLO('yolo11m.pt'); print('YOLO11m ready.')"
+python -c "from ultralytics import YOLO; YOLO('yolo11s.pt'); YOLO('yolo11m.pt'); print('YOLO models ready.')"
 if errorlevel 1 (
-    echo ERROR: YOLO11m setup failed.
+    echo ERROR: YOLO model setup failed.
     pause
     exit /b 1
 )
@@ -102,6 +102,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+
 
 echo.
 echo ============================================================

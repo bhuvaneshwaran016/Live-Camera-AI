@@ -1,5 +1,9 @@
 import os
 import sys
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import cv2
 import json
 import time
@@ -32,29 +36,52 @@ except ImportError:
     CameraMotionEstimator = None
 
 
+import yaml
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
-YOLO_MODEL = "yolo11m.pt"
+CONFIG_PATH = PROJECT_DIR / "config.yaml"
+CONFIG = {}
+if CONFIG_PATH.exists():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            CONFIG = yaml.safe_load(f) or {}
+    except Exception as exc:
+        print(f"Warning: Could not read config.yaml ({exc}). Using defaults.")
 
-QWEN_MODEL = PROJECT_DIR / "models" / "Qwen2.5-VL-3B-Instruct"
+cam_cfg = CONFIG.get("camera", {})
+det_cfg = CONFIG.get("detection", {})
+qwen_cfg = CONFIG.get("qwen", {})
+app_cfg = CONFIG.get("application", {})
 
-CAMERA_INDEX = 0
+YOLO_MODEL = det_cfg.get("model", "yolo11s.pt")
 
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 720
+qwen_model_setting = qwen_cfg.get("model", "models/Qwen2.5-VL-3B-Instruct")
+if Path(qwen_model_setting).is_absolute():
+    QWEN_MODEL = Path(qwen_model_setting)
+else:
+    QWEN_MODEL = PROJECT_DIR / qwen_model_setting
 
-YOLO_IMGSZ = 640
-YOLO_CONF = 0.25
-YOLO_IOU = 0.45
+QWEN_PRECISION = str(qwen_cfg.get("precision", "4bit")).lower()
+QWEN_DEVICE = str(qwen_cfg.get("device", "cuda")).lower()
 
-WINDOW_NAME = "Live Vision AI"
+CAMERA_INDEX = cam_cfg.get("index", 0)
+
+CAMERA_WIDTH = cam_cfg.get("width", 1280)
+CAMERA_HEIGHT = cam_cfg.get("height", 720)
+
+YOLO_IMGSZ = det_cfg.get("image_size", 640)
+YOLO_CONF = det_cfg.get("confidence", 0.25)
+YOLO_IOU = det_cfg.get("iou", 0.45)
+
+WINDOW_NAME = app_cfg.get("window_name", "Live Vision AI")
 
 # Maximum number of tokens generated for an answer.
-MAX_NEW_TOKENS = 256
+MAX_NEW_TOKENS = qwen_cfg.get("max_new_tokens", 256)
 
 # Keep a few recent questions/results for diagnostics.
 QUESTION_HISTORY_SIZE = 20
@@ -77,6 +104,9 @@ class LiveState:
 
         self.latest_detections = []
         self.latest_tracks = []
+
+        self.target_classes = None  # None means detect ALL objects
+        self.target_filter_name = None
 
         self.camera_state = {
             "valid": False,
@@ -102,6 +132,15 @@ class LiveState:
         )
 
         self.running = True
+
+    def set_target_classes(self, classes, filter_name=None):
+        with self.lock:
+            self.target_classes = list(classes) if classes is not None else None
+            self.target_filter_name = filter_name
+
+    def get_target_classes(self):
+        with self.lock:
+            return list(self.target_classes) if self.target_classes is not None else None
 
     def set_frame(
         self,
@@ -195,21 +234,22 @@ def safe_float(value, default=0.0):
 def load_qwen():
     print()
     print("=" * 70)
-    print("Loading local Qwen2.5-VL 3B...")
+    print(f"Loading local Qwen2.5-VL 3B (Precision: {QWEN_PRECISION.upper()})...")
     print("=" * 70)
 
     model_path = QWEN_MODEL.resolve()
 
     if not model_path.exists():
         raise FileNotFoundError(
-            f"Qwen model directory does not exist:\n{model_path}"
+            f"Qwen model directory does not exist:\n{model_path}\n"
+            f"Please run setup.bat or download the model first."
         )
 
     config_file = model_path / "config.json"
 
     if not config_file.exists():
         raise FileNotFoundError(
-            f"Qwen config.json not found:\n{config_file}"
+            f"Qwen config.json not found in:\n{config_file}"
         )
 
     weight_files = list(
@@ -237,15 +277,52 @@ def load_qwen():
 
     print("Processor loaded.")
 
-    print("\nLoading model...")
+    print(f"\nLoading model into GPU/RAM ({QWEN_PRECISION} precision mode)...")
 
     t0 = time.perf_counter()
 
+    kwargs = {
+        "local_files_only": True,
+    }
+
+    if QWEN_PRECISION == "4bit":
+        try:
+            from transformers import BitsAndBytesConfig
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+            )
+            kwargs["quantization_config"] = quant_config
+            kwargs["device_map"] = "auto"
+            print("Mode: 4-bit NF4 Quantization (Laptop GPU ~2.2GB VRAM requirement)")
+        except Exception as exc:
+            print(f"WARNING: 4-bit quantization error ({exc}). Falling back to float16.")
+            kwargs["torch_dtype"] = torch.float16
+            kwargs["device_map"] = "auto"
+    elif QWEN_PRECISION == "8bit":
+        try:
+            from transformers import BitsAndBytesConfig
+            quant_config = BitsAndBytesConfig(load_in_8bit=True)
+            kwargs["quantization_config"] = quant_config
+            kwargs["device_map"] = "auto"
+            print("Mode: 8-bit Quantization (~3.5GB VRAM requirement)")
+        except Exception as exc:
+            print(f"WARNING: 8-bit quantization error ({exc}). Falling back to float16.")
+            kwargs["torch_dtype"] = torch.float16
+            kwargs["device_map"] = "auto"
+    elif QWEN_PRECISION == "cpu":
+        kwargs["torch_dtype"] = torch.float32
+        kwargs["device_map"] = "cpu"
+        print("Mode: System CPU / RAM")
+    else:
+        kwargs["torch_dtype"] = torch.float16
+        kwargs["device_map"] = "auto"
+        print("Mode: standard float16")
+
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         str(model_path),
-        torch_dtype=torch.float16,
-        device_map="auto",
-        local_files_only=True,
+        **kwargs
     )
 
     elapsed = time.perf_counter() - t0
@@ -272,12 +349,12 @@ def load_qwen():
 def load_yolo():
     print()
     print("=" * 70)
-    print("Loading YOLO11m...")
+    print(f"Loading YOLO model ({YOLO_MODEL})...")
     print("=" * 70)
 
     model = YOLO(YOLO_MODEL)
 
-    print("YOLO loaded.")
+    print(f"YOLO ({YOLO_MODEL}) loaded.")
 
     return model
 
@@ -289,13 +366,17 @@ def load_yolo():
 def open_camera():
     print()
     print("=" * 70)
-    print("Opening camera...")
+    print(f"Opening camera (Index {CAMERA_INDEX})...")
     print("=" * 70)
 
-    cap = cv2.VideoCapture(
-        CAMERA_INDEX,
-        cv2.CAP_V4L2,
-    )
+    if sys.platform == "win32":
+        cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(CAMERA_INDEX)
+    else:
+        cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(CAMERA_INDEX)
 
     if not cap.isOpened():
         raise RuntimeError(
@@ -332,6 +413,7 @@ def open_camera():
     print(f"Camera resolution: {w}x{h}")
 
     return cap
+
 
 
 # ============================================================
@@ -1033,34 +1115,98 @@ def answer_question(
 
 
 # ============================================================
+# TARGET CLASS DYNAMIC MATCHING (OPEN VOCABULARY SUPPORT)
+# ============================================================
+
+def match_target_classes(yolo_names, query_text):
+    """
+    Dynamically matches query_text against yolo_names without hardcoded COCO dictionaries.
+    """
+    if not query_text:
+        return None
+    query_clean = str(query_text).lower().strip()
+
+    if query_clean in ["all", "clear", "reset", "everything", "none", "off", "all objects"]:
+        return None
+
+    # Dynamic synonym normalization helper
+    synonyms = {
+        "human": ["person"],
+        "humans": ["person"],
+        "people": ["person"],
+        "man": ["person"],
+        "woman": ["person"],
+        "guy": ["person"],
+        "phone": ["cell phone"],
+        "phones": ["cell phone"],
+        "mobile": ["cell phone"],
+        "cellphone": ["cell phone"],
+        "laptop": ["laptop"],
+        "laptops": ["laptop"],
+        "computer": ["laptop", "tv"],
+        "computers": ["laptop", "tv"],
+        "screen": ["tv"],
+        "monitor": ["tv"],
+        "bottle": ["bottle"],
+        "bottles": ["bottle"],
+        "cup": ["cup"],
+        "cups": ["cup"],
+        "chair": ["chair"],
+        "chairs": ["chair"],
+    }
+
+    words = query_clean.split()
+    target_words = set(words)
+    target_words.add(query_clean)
+
+    for w in words:
+        singular = w[:-1] if w.endswith("s") and len(w) > 2 else w
+        target_words.add(singular)
+        if w in synonyms:
+            target_words.update(synonyms[w])
+        if singular in synonyms:
+            target_words.update(synonyms[singular])
+
+    matched_ids = set()
+    if isinstance(yolo_names, dict):
+        for cid, cname in yolo_names.items():
+            cname_lower = str(cname).lower()
+            for tw in target_words:
+                if tw == cname_lower or tw in cname_lower or cname_lower in tw:
+                    matched_ids.add(int(cid))
+
+    if matched_ids:
+        return sorted(list(matched_ids))
+    return None
+
+
+# ============================================================
 # TERMINAL INPUT
 # ============================================================
 
 def terminal_input_loop(
     model,
     processor,
+    yolo_names=None,
 ):
     print()
     print("=" * 70)
-    print("LIVE QUESTION INPUT")
+    print("LIVE QUESTION & OPEN-VOCABULARY DETECTION INPUT")
     print("=" * 70)
-    print("Type a question and press ENTER.")
-    print("The answer will use the freshest camera frame.")
-    print("Type 'quit' or 'exit' to stop.")
+    print("• Count Any Object: 'count humans', 'count phone', 'count laptops', etc.")
+    print("• Open Vision Questions: 'where is the charger', 'what am I holding', etc.")
+    print("• Reset Detection Filter: 'clear' or 'detect all'")
+    print("• Type 'quit' or 'exit' to stop.")
     print("=" * 70)
     print()
 
     while LIVE.running:
         try:
             question = input(
-                "\nQuestion > "
+                "\nQuestion / Command > "
             )
 
-        except EOFError:
-            LIVE.running = False
-            break
-
-        except KeyboardInterrupt:
+        except (EOFError, KeyboardInterrupt):
             LIVE.running = False
             break
 
@@ -1076,8 +1222,50 @@ def terminal_input_loop(
             LIVE.running = False
             break
 
-        # Run Qwen in a worker thread so the camera/display
-        # loop continues receiving frames.
+        q_lower = question.lower()
+
+        # Check for count / filter commands
+        count_triggers = ["count ", "how many ", "detect ", "filter ", "only ", "show ", "target "]
+        is_count_cmd = any(t in q_lower for t in count_triggers) or q_lower in ["count", "filter clear", "detect all", "clear", "all"]
+
+        if is_count_cmd:
+            target_str = q_lower
+            for t in count_triggers:
+                target_str = target_str.replace(t, "")
+            target_str = target_str.replace("the ", "").replace("in live video", "").replace("live", "").strip()
+
+            if target_str in ["clear", "all", "reset", "everything", "off", "none", ""]:
+                LIVE.set_target_classes(None, None)
+                print()
+                print("=" * 70)
+                print("LIVE VIDEO FILTER RESET")
+                print("=" * 70)
+                print("Live camera is now detecting and tracking ALL objects.")
+                print("=" * 70)
+            else:
+                matched_ids = match_target_classes(yolo_names, target_str)
+                LIVE.set_target_classes(matched_ids, target_str)
+
+                # Compute instant count from live snapshot
+                _, tracks, _ = LIVE.get_scene_snapshot()
+                visible_tracks = [t for t in tracks if getattr(t, "visible", False)]
+                if matched_ids:
+                    target_count = len([t for t in visible_tracks if int(t.class_id) in matched_ids])
+                    matched_names = [yolo_names.get(cid, str(cid)) for cid in matched_ids] if isinstance(yolo_names, dict) else matched_ids
+                else:
+                    target_count = len(visible_tracks)
+                    matched_names = ["Open-Vocabulary / Vision LLM"]
+
+                print()
+                print("=" * 70)
+                print(f"INSTANT LIVE COUNT (0.01s)")
+                print("=" * 70)
+                print(f"Target Object : {target_str.title()} ({matched_names})")
+                print(f"Current Count : {target_count} visible in live video")
+                print(f"Live Status   : Monitoring every 2 seconds continuously in terminal.")
+                print("=" * 70)
+
+        # Spawns Qwen Vision-LLM worker for visual analysis/reasoning on the live camera frame
         worker = threading.Thread(
             target=answer_question,
             args=(
@@ -1089,6 +1277,45 @@ def terminal_input_loop(
         )
 
         worker.start()
+
+
+# ============================================================
+# TARGET OBJECT LIVE 2-SECOND CONTINUOUS COUNT MONITOR
+# ============================================================
+
+def smart_target_monitor_loop():
+    """
+    When a target object or prompt is active, this monitors and prints
+    the live camera count EVERY 2 SECONDS continuously in the terminal.
+    """
+    last_check_time = 0.0
+
+    while LIVE.running:
+        time.sleep(0.4)
+        now = time.time()
+        if now - last_check_time < 2.0:
+            continue
+        last_check_time = now
+
+        target_classes = LIVE.get_target_classes()
+        current_filter_name = LIVE.target_filter_name
+
+        if target_classes is None and current_filter_name is None:
+            continue
+
+        detections, tracks, _ = LIVE.get_scene_snapshot()
+        visible_tracks = [t for t in tracks if getattr(t, "visible", False)]
+
+        if target_classes is not None:
+            matching_tracks = [t for t in visible_tracks if int(t.class_id) in target_classes]
+            count = len(matching_tracks)
+        else:
+            count = len(visible_tracks)
+
+        time_str = time.strftime("%H:%M:%S")
+        target_disp = (current_filter_name or "ALL OBJECTS").upper()
+        print(f"\n[LIVE 2s DETECT {time_str}] Target: '{target_disp}' | Visible Count: {count}")
+
 
 
 # ============================================================
@@ -1330,31 +1557,13 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Start terminal input.
-    # --------------------------------------------------------
-
-    input_thread = threading.Thread(
-        target=terminal_input_loop,
-        args=(
-            qwen,
-            processor,
-        ),
-        daemon=True,
-    )
-
-    input_thread.start()
-
-    # --------------------------------------------------------
-    # Main camera loop.
+    # Main camera loop setup.
     # --------------------------------------------------------
 
     frame_count = 0
-
     fps_start = time.perf_counter()
     fps_frames = 0
     fps = 0.0
-
-    last_loop_time = time.perf_counter()
 
     cv2.namedWindow(
         WINDOW_NAME,
@@ -1366,9 +1575,26 @@ def main():
     print("CAMERA LOOP STARTED")
     print("=" * 70)
     print("The camera is now continuously running.")
-    print("Ask questions from the terminal.")
     print("Press 'q' in the camera window to quit.")
-    print()
+    print("=" * 70)
+
+    # Start terminal input thread and smart target monitor thread.
+    input_thread = threading.Thread(
+        target=terminal_input_loop,
+        args=(
+            qwen,
+            processor,
+            getattr(yolo, "names", None),
+        ),
+        daemon=True,
+    )
+    input_thread.start()
+
+    monitor_thread = threading.Thread(
+        target=smart_target_monitor_loop,
+        daemon=True,
+    )
+    monitor_thread.start()
 
     try:
         while LIVE.running:
